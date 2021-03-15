@@ -46,6 +46,12 @@ var (
 			},
 		},
 	}
+	longerIDValidateOption = CSINodeValidationOptions{
+		AllowLongNodeID: true,
+	}
+	shorterIDValidationOption = CSINodeValidationOptions{
+		AllowLongNodeID: false,
+	}
 )
 
 func TestValidateStorageClass(t *testing.T) {
@@ -1026,8 +1032,9 @@ func TestValidateAllowedTopologies(t *testing.T) {
 func TestCSINodeValidation(t *testing.T) {
 	driverName := "driver-name"
 	driverName2 := "1io.kubernetes-storage-2-csi-driver3"
-	longName := "my-a-b-c-d-c-f-g-h-i-j-k-l-m-n-o-p-q-r-s-t-u-v-w-x-y-z-ABCDEFGHIJKLMNOPQRSTUVWXYZ-driver"
+	longName := "my-a-b-c-d-c-f-g-h-i-j-k-l-m-n-o-p-q-r-s-t-u-v-w-x-y-z-ABCDEFGHIJKLMNOPQRSTUVWXYZ-driver" // 88 chars
 	nodeID := "nodeA"
+	longID := longName + longName // 176 chars
 	successCases := []storage.CSINode{
 		{
 			// driver name: dot only
@@ -1217,10 +1224,29 @@ func TestCSINodeValidation(t *testing.T) {
 	}
 
 	for _, csiNode := range successCases {
-		if errs := ValidateCSINode(&csiNode); len(errs) != 0 {
+		if errs := ValidateCSINode(&csiNode, shorterIDValidationOption); len(errs) != 0 {
 			t.Errorf("expected success: %v", errs)
 		}
 	}
+
+	nodeIDCase := storage.CSINode{
+		// node ID length > 128 but < 192
+		ObjectMeta: metav1.ObjectMeta{Name: "foo7"},
+		Spec: storage.CSINodeSpec{
+			Drivers: []storage.CSINodeDriver{
+				{
+					Name:         driverName,
+					NodeID:       longID,
+					TopologyKeys: []string{"company.com/zone1", "company.com/zone2"},
+				},
+			},
+		},
+	}
+
+	if errs := ValidateCSINode(&nodeIDCase, longerIDValidateOption); len(errs) != 0 {
+		t.Errorf("expected success: %v", errs)
+	}
+
 	errorCases := []storage.CSINode{
 		{
 			// Empty driver name
@@ -1414,10 +1440,11 @@ func TestCSINodeValidation(t *testing.T) {
 				},
 			},
 		},
+		nodeIDCase,
 	}
 
 	for _, csiNode := range errorCases {
-		if errs := ValidateCSINode(&csiNode); len(errs) == 0 {
+		if errs := ValidateCSINode(&csiNode, shorterIDValidationOption); len(errs) == 0 {
 			t.Errorf("Expected failure for test: %v", csiNode)
 		}
 	}
@@ -1528,7 +1555,7 @@ func TestCSINodeUpdateValidation(t *testing.T) {
 	}
 
 	for _, csiNode := range successCases {
-		if errs := ValidateCSINodeUpdate(&csiNode, &old); len(errs) != 0 {
+		if errs := ValidateCSINodeUpdate(&csiNode, &old, shorterIDValidationOption); len(errs) != 0 {
 			t.Errorf("expected success: %+v", errs)
 		}
 	}
@@ -1651,7 +1678,7 @@ func TestCSINodeUpdateValidation(t *testing.T) {
 	}
 
 	for _, csiNode := range errorCases {
-		if errs := ValidateCSINodeUpdate(&csiNode, &old); len(errs) == 0 {
+		if errs := ValidateCSINodeUpdate(&csiNode, &old, shorterIDValidationOption); len(errs) == 0 {
 			t.Errorf("Expected failure for test: %+v", csiNode)
 		}
 	}
@@ -1900,11 +1927,11 @@ func TestCSIDriverValidationUpdate(t *testing.T) {
 	podInfoOnMount := true
 	storageCapacity := true
 	notPodInfoOnMount := false
+	gcp := "gcp"
+	requiresRepublish := true
 	notRequiresRepublish := false
 	notStorageCapacity := false
 	resourceVersion := "1"
-	invalidFSGroupPolicy := storage.ReadWriteOnceWithFSTypeFSGroupPolicy
-	invalidFSGroupPolicy = "invalid-mode"
 	old := storage.CSIDriver{
 		ObjectMeta: metav1.ObjectMeta{Name: driverName, ResourceVersion: resourceVersion},
 		Spec: storage.CSIDriverSpec{
@@ -1919,30 +1946,35 @@ func TestCSIDriverValidationUpdate(t *testing.T) {
 		},
 	}
 
-	// Currently we compare the object against itself
-	// and ensure updates succeed
-	successCases := []storage.CSIDriver{
-		old,
-		// An invalid FSGroupPolicy should still pass
+	successCases := []struct {
+		name   string
+		modify func(new *storage.CSIDriver)
+	}{
 		{
-			ObjectMeta: metav1.ObjectMeta{Name: driverName, ResourceVersion: resourceVersion},
-			Spec: storage.CSIDriverSpec{
-				AttachRequired: &attachNotRequired,
-				PodInfoOnMount: &notPodInfoOnMount,
-				VolumeLifecycleModes: []storage.VolumeLifecycleMode{
-					storage.VolumeLifecycleEphemeral,
-					storage.VolumeLifecyclePersistent,
-				},
-				FSGroupPolicy:   &invalidFSGroupPolicy,
-				StorageCapacity: &storageCapacity,
+			name:   "no change",
+			modify: func(new *storage.CSIDriver) {},
+		},
+		{
+			name: "change TokenRequests",
+			modify: func(new *storage.CSIDriver) {
+				new.Spec.TokenRequests = []storage.TokenRequest{{Audience: gcp}}
+			},
+		},
+		{
+			name: "change RequiresRepublish",
+			modify: func(new *storage.CSIDriver) {
+				new.Spec.RequiresRepublish = &requiresRepublish
 			},
 		},
 	}
-	for _, csiDriver := range successCases {
-		newDriver := csiDriver.DeepCopy()
-		if errs := ValidateCSIDriverUpdate(&csiDriver, newDriver); len(errs) != 0 {
-			t.Errorf("expected success for %+v: %v", csiDriver, errs)
-		}
+	for _, test := range successCases {
+		t.Run(test.name, func(t *testing.T) {
+			new := old.DeepCopy()
+			test.modify(new)
+			if errs := ValidateCSIDriverUpdate(new, &old); len(errs) != 0 {
+				t.Errorf("Expected success for %+v: %v", new, errs)
+			}
+		})
 	}
 
 	// Each test case changes exactly one field. None of that is valid.
@@ -1969,15 +2001,15 @@ func TestCSIDriverValidationUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "PodInfoOnMount not set",
-			modify: func(new *storage.CSIDriver) {
-				new.Spec.PodInfoOnMount = nil
-			},
-		},
-		{
 			name: "AttachRequired changed",
 			modify: func(new *storage.CSIDriver) {
 				new.Spec.AttachRequired = &attachRequired
+			},
+		},
+		{
+			name: "PodInfoOnMount not set",
+			modify: func(new *storage.CSIDriver) {
+				new.Spec.PodInfoOnMount = nil
 			},
 		},
 		{
@@ -2037,6 +2069,12 @@ func TestCSIDriverValidationUpdate(t *testing.T) {
 				new.Spec.StorageCapacity = &notStorageCapacity
 			},
 		},
+		{
+			name: "TokenRequests invalidated",
+			modify: func(new *storage.CSIDriver) {
+				new.Spec.TokenRequests = []storage.TokenRequest{{Audience: gcp}, {Audience: gcp}}
+			},
+		},
 	}
 
 	for _, test := range errorCases {
@@ -2044,7 +2082,7 @@ func TestCSIDriverValidationUpdate(t *testing.T) {
 			new := old.DeepCopy()
 			test.modify(new)
 			if errs := ValidateCSIDriverUpdate(new, &old); len(errs) == 0 {
-				t.Errorf("Expected failure for test: %v", new)
+				t.Errorf("Expected failure for test: %+v", new)
 			}
 		})
 	}
@@ -2226,7 +2264,7 @@ func TestCSIServiceAccountToken(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			desc: "invalid - TokenRequests has tokens with ExpirationSeconds less than 10min",
+			desc: "invalid - TokenRequests has tokens with ExpirationSeconds longer than 1<<32 min",
 			csiDriver: &storage.CSIDriver{
 				ObjectMeta: metav1.ObjectMeta{Name: driverName},
 				Spec: storage.CSIDriverSpec{
