@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"net"
 
 	"github.com/containernetworking/cni/libcni"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
@@ -39,6 +40,7 @@ import (
 	"k8s.io/kubernetes/pkg/util/bandwidth"
 	utilslice "k8s.io/kubernetes/pkg/util/slice"
 	utilexec "k8s.io/utils/exec"
+	"github.com/containernetworking/plugins/pkg/ns"
 )
 
 const (
@@ -311,6 +313,7 @@ func (plugin *cniNetworkPlugin) SetUpPod(namespace string, name string, id kubec
 	// Todo get the timeout from parent ctx
 	cniTimeoutCtx, cancelFunc := context.WithTimeout(context.Background(), network.CNITimeoutSec*time.Second)
 	defer cancelFunc()
+	fmt.Errorf("Running\n")
 	// Windows doesn't have loNetwork. It comes only with Linux
 	if plugin.loNetwork != nil {
 		if _, err = plugin.addToNetwork(cniTimeoutCtx, plugin.loNetwork, name, namespace, id, netnsPath, annotations, options); err != nil {
@@ -319,6 +322,13 @@ func (plugin *cniNetworkPlugin) SetUpPod(namespace string, name string, id kubec
 	}
 
 	_, err = plugin.addToNetwork(cniTimeoutCtx, plugin.getDefaultNetwork(), name, namespace, id, netnsPath, annotations, options)
+	err = ns.WithNetNSPath(netnsPath, func(hostNS ns.NetNS) error {
+		ifaces, err := net.Interfaces()
+		for _, iface := range ifaces {
+			klog.InfoS("Interfaces: %v\n", iface.Name)
+		}
+		return err
+	})
 	return err
 }
 
