@@ -58,6 +58,7 @@ require (
 	github.com/hashicorp/golang-lru v0.5.1
 	github.com/heketi/heketi v10.2.0+incompatible
 	github.com/heketi/tests v0.0.0-20151005000721-f3775cbcefd6 // indirect
+	github.com/iovisor/gobpf v0.1.1
 	github.com/ishidawataru/sctp v0.0.0-20190723014705-7c296d48a2b5
 	github.com/json-iterator/go v1.1.10
 	github.com/libopenstorage/openstorage v1.0.0
